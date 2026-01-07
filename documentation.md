@@ -63,13 +63,19 @@ Compared against factual market data
 This enables objective scoring.
 
 7. High-Level System Architecture
+
+Current Implementation (Phase 1 - Ingestion Pipeline):
 YouTube API
    ↓
 Video Metadata & Transcripts
    ↓
+Transcript Segmentation
+   ↓
 Prediction Extraction (LLM)
    ↓
-Prediction Structuring
+Prediction Storage
+
+Planned Implementation (Phase 2):
    ↓
 Market Outcome Retrieval
    ↓
@@ -111,114 +117,168 @@ Store metadata (title, URL, publish date)
 Fetch full video transcript
 Segment transcript by timestamps
 Store transcript blocks
-9.4 Prediction Extraction
+9.4 Prediction Extraction (IMPLEMENTED)
 Identify prediction statements using AI
 Extract:
-Claim
-Asset / market
-Time horizon
-Confidence level (if mentioned)
-9.5 Outcome Evaluation
+- Claim (required)
+- Asset / market (optional)
+- Time horizon in months (optional)
+- Confidence level: low, medium, or high (required, defaults to medium)
+- Prediction type: price, direction, relative performance, or macro (required, defaults to direction)
+- Links predictions to transcript chunks and videos
+9.5 Outcome Evaluation (Planned - Phase 2)
 Fetch real market data after prediction horizon
 Compare predicted vs actual outcomes
 Generate natural-language explanation
-9.6 Scoring System
+9.6 Scoring System (Planned - Phase 2)
 Assign numerical accuracy scores
 Aggregate per video and creator
-9.7 Frontend Display
-Public leaderboard
-Creator detail pages
-Prediction-level breakdown
+9.7 API Endpoints (IMPLEMENTED)
+POST /api/ingest/channel
+- Triggers full ingestion pipeline for a YouTube channel
+- Requires API key authentication (x-api-key header)
+- Rate limited: 5 requests per minute per IP
+- Request body: { "channelId": "UCXXXX", "options": {...} }
+- Options: maxVideos, skipVideoFetch, skipTranscriptFetch, skipPredictionExtraction
+- Returns pipeline execution results with stage-by-stage statistics
+
+GET /api/ingest/channel?channelId=UCXXXX
+- Check if pipeline is currently running for a channel
+- Returns: { channelId, isRunning, message }
+
+9.8 Frontend Display
+Public leaderboard (UI implemented, using mock data)
+Creator detail pages (Planned - Phase 2)
+Prediction-level breakdown (Planned - Phase 2)
 
 10. Database Design (Prisma)
 Creator Table
 model Creator {
   id            String   @id @default(uuid())
   name          String
-  youtubeHandle String
-  channelId     String
-  avatarUrl     String
+  channelId     String   @unique
+  youtubeHandle String?
+  avatarUrl     String?
   createdAt     DateTime @default(now())
 
   videos        Video[]
-  score         CreatorScore?
+
+  @@index([channelId])
 }
 
 
 Video Table
 model Video {
-  id           String   @id
-  creatorId   String
-  title        String
-  url          String
-  publishedAt  DateTime
+  id                 String            @id // YouTube video ID
+  creatorId          String
+  title              String
+  description        String?
+  url                String
+  publishedAt        DateTime
+  transcriptFetched  Boolean           @default(false)
+  predictionsExtracted Boolean         @default(false)
+  createdAt          DateTime          @default(now())
 
-  predictions  Prediction[]
+  creator            Creator           @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  transcriptChunks   TranscriptChunk[]
+  predictions        Prediction[]
+
+  @@index([creatorId])
+  @@index([publishedAt])
+}
+
+
+TranscriptChunk Table
+model TranscriptChunk {
+  id          String       @id @default(uuid())
+  videoId     String
+  text        String
+  startTime   Float        // seconds
+  createdAt   DateTime     @default(now())
+
+  video       Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  predictions Prediction[]
+
+  @@index([videoId])
+  @@index([startTime])
 }
 
 
 Prediction Table
 model Prediction {
-  id             String   @id @default(uuid())
-  videoId        String
-  timestamp      Int
-  transcriptText String
+  id                String   @id @default(uuid())
+  videoId           String
+  transcriptChunkId String
+  timestamp         Float    // seconds from video start
+  transcriptText    String   // original transcript text
+  predictedClaim    String
+  asset             String?
+  horizonMonths     Int?
+  confidence        String   // low, medium, high
+  predictionType    String   // price, direction, relative performance, macro
+  createdAt         DateTime @default(now())
 
-  predictedClaim String
-  predictionType String
-  horizonMonths  Int
+  video             Video           @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  transcriptChunk   TranscriptChunk @relation(fields: [transcriptChunkId], references: [id], onDelete: Cascade)
 
-  outcome        Outcome?
-  score          Float?
+  @@index([videoId])
+  @@index([asset])
+  @@index([predictionType])
+  @@index([createdAt])
 }
 
 
-Outcome Table
-model Outcome {
-  id             String   @id @default(uuid())
-  predictionId   String
-
-  actualOutcome  String
-  supportingData String
-  evaluation     String
-  accuracyScore  Float
-}
-
-
-CreatorScore Table
-model CreatorScore {
-  creatorId      String @id
-  overallScore   Float
-  totalEvaluated Int
-  lastUpdated    DateTime
-}
+Note: Outcome and CreatorScore tables are planned for future implementation (Phase 2) when prediction evaluation and scoring features are added.
 
 
 11. AI Processing Pipeline
-Step 1: Prediction Extraction (Gemini)
-Input:
-Transcript segment
-Output:
-{
-  "claim": "NIFTY will fall 15% in 2023",
-  "asset": "NIFTY50",
-  "horizon_months": 12,
-  "confidence": "high"
-}
 
+Current Implementation (Phase 1):
 
-Step 2: Market Outcome Retrieval
-Search historical market performance
-Store:
-Price movement
-Time period
-Key events
+Step 1: Video Ingestion
+- Fetch videos from YouTube Data API v3
+- Filter finance-related videos using keywords (market, stock, invest, economy)
+- Store video metadata (title, description, URL, publish date)
+- Create/update Creator records
 
-Step 3: Prediction Evaluation (Gemini)
-Evaluation Prompt:
-Compare claim vs reality
-Generate explanation
-Score accuracy between 0.0 – 1.0
+Step 2: Transcript Fetching
+- Fetch full video transcripts using youtube-transcript library
+- Store transcript chunks with timestamps
+- Mark videos as transcriptFetched
+
+Step 3: Transcript Segmentation
+- Group transcript chunks into semantic blocks (~2-3 sentences)
+- Each block represents a coherent segment of speech
+- Blocks are used for prediction extraction
+
+Step 4: Prediction Extraction (Gemini)
+- Process each transcript block using Gemini 1.5 Flash
+- Extract explicit or implicit future-oriented financial predictions
+- Output structure:
+  {
+    "claim": "NIFTY will fall 15% in 2023",
+    "asset": "NIFTY50" | null,
+    "horizonMonths": 12 | null,
+    "confidence": "low" | "medium" | "high",
+    "predictionType": "price" | "direction" | "relative performance" | "macro"
+  }
+- Store predictions linked to video and transcript chunk
+- Mark videos as predictionsExtracted
+
+Planned Implementation (Phase 2):
+
+Step 5: Market Outcome Retrieval
+- Search historical market performance
+- Store:
+  - Price movement
+  - Time period
+  - Key events
+
+Step 6: Prediction Evaluation (Gemini)
+- Evaluation Prompt:
+  - Compare claim vs reality
+  - Generate explanation
+  - Score accuracy between 0.0 – 1.0
 
 12. Scoring Methodology
 Prediction-Level Score
@@ -241,30 +301,40 @@ Time horizon
 Recency
 
 13. Frontend Pages
+
+Current Implementation:
 /leaderboard
-Rank
-Creator name
-Overall accuracy %
-Total predictions evaluated
+- UI implemented with mock data
+- Displays: Rank, Creator name, Overall accuracy %, Total predictions evaluated
+- Note: Currently shows placeholder data; will be connected to database in Phase 2
+
+Planned Implementation (Phase 2):
 /creator/[slug]
-Creator profile
-Accuracy trend chart
-List of predictions:
-Video link
-Timestamp
-Prediction
-Outcome
-Score
+- Creator profile
+- Accuracy trend chart
+- List of predictions:
+  - Video link
+  - Timestamp
+  - Prediction
+  - Outcome
+  - Score
 /methodology
-Explanation of system
-Scoring logic
-AI limitations
+- Explanation of system
+- Scoring logic
+- AI limitations
 
 14. Cron Jobs & Automation
-Daily video ingestion
-Weekly prediction extraction
-Monthly re-evaluation for long horizons
-Score recalculation
+
+Current Implementation:
+- Manual API endpoint: POST /api/ingest/channel
+- Rate limiting: 5 requests per minute per IP
+- API key authentication via INGEST_API_KEY
+
+Planned Implementation (Phase 2):
+- Daily video ingestion (automated)
+- Weekly prediction extraction (automated)
+- Monthly re-evaluation for long horizons
+- Score recalculation
 
 15. Legal & Ethical Considerations
 Mandatory Disclaimers
@@ -277,14 +347,24 @@ Evidence-backed explanations only
 Transparent methodology
 
 16. MVP Scope
-Phase 1
-3 creators
-2022–2024 videos
-Manual data verification
-Phase 2
-Fully automated pipeline
-Public launch
-Community feedback
+
+Phase 1 (Current Implementation - COMPLETED)
+✅ Database schema with 4 models (Creator, Video, TranscriptChunk, Prediction)
+✅ YouTube video ingestion via API
+✅ Transcript fetching and segmentation
+✅ Prediction extraction using Gemini API
+✅ API endpoint with authentication and rate limiting
+✅ Pipeline orchestrator with idempotent flow
+✅ Test coverage for core functionality
+
+Phase 2 (Planned - NOT YET IMPLEMENTED)
+⏳ Outcome evaluation system
+⏳ Scoring engine
+⏳ CreatorScore aggregation
+⏳ Frontend integration with real data
+⏳ Fully automated pipeline
+⏳ Public launch
+⏳ Community feedback
 
 17. Future Enhancements
 Stock-level accuracy
