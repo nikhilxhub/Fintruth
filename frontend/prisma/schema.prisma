@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Creator {
+  id            String   @id @default(uuid())
+  name          String
+  channelId     String   @unique
+  youtubeHandle String?
+  avatarUrl     String?
+  createdAt     DateTime @default(now())
+  videos        Video[]
+
+  @@index([channelId])
+}
+
+model Video {
+  id               String            @id // YouTube video ID
+  creatorId        String
+  title            String
+  description      String?
+  url              String
+  publishedAt      DateTime
+  transcriptFetched Boolean          @default(false)
+  predictionsExtracted Boolean       @default(false)
+  createdAt        DateTime          @default(now())
+
+  creator          Creator           @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  transcriptChunks TranscriptChunk[]
+  predictions      Prediction[]
+
+  @@index([creatorId])
+  @@index([publishedAt])
+}
+
+model TranscriptChunk {
+  id          String       @id @default(uuid())
+  videoId     String
+  text        String
+  startTime   Float        // seconds
+  createdAt   DateTime     @default(now())
+
+  video       Video        @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  predictions Prediction[]
+
+  @@index([videoId])
+  @@index([startTime])
+}
+
+model Prediction {
+  id                String   @id @default(uuid())
+  videoId           String
+  transcriptChunkId String
+  timestamp         Float    // seconds from video start
+  transcriptText    String   // original transcript text
+  predictedClaim    String
+  asset             String?
+  horizonMonths     Int?
+  confidence        String   // low, medium, high
+  predictionType    String   // price, direction, relative performance, macro
+  createdAt         DateTime @default(now())
+
+  video             Video           @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  transcriptChunk   TranscriptChunk @relation(fields: [transcriptChunkId], references: [id], onDelete: Cascade)
+
+  @@index([videoId])
+  @@index([asset])
+  @@index([predictionType])
+  @@index([createdAt])
+}
