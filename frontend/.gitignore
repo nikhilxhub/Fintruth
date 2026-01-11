@@ -17,6 +17,11 @@
 /.next/
 /out/
 
+DEBUG_REDIRECT_URI.md
+FIX_REDIRECT_URI.md
+OAUTH2_QUICK_START.md
+OAUTH2_QUICK_START.md 
+
 # production
 /build
 
@@ -31,7 +36,7 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
-# .env*
+.env*
 
 # vercel
 .vercel

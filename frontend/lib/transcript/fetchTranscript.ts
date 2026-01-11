@@ -1,5 +1,6 @@
 import { YoutubeTranscript } from 'youtube-transcript';
 import prisma from '../db';
+import { fetchTranscriptUsingYtApi } from './fetchTranscriptYtApi';
 
 export interface TranscriptEntry {
   text: string;
@@ -11,6 +12,7 @@ export interface FetchTranscriptResult {
   videoId: string;
   chunksStored: number;
   error?: string;
+  transcriptEntries?: TranscriptEntry[]; // Optional: used internally for YouTube Data API v3
 }
 
 /**
@@ -63,70 +65,99 @@ export async function fetchTranscriptForVideo(videoId: string): Promise<FetchTra
     // Fetch transcript from YouTube
     console.log(`[fetchTranscript] Fetching transcript for video: ${videoId}`);
 
-    const rawTranscript = await YoutubeTranscript.fetchTranscript(videoId);
+    try {
+      let normalizedTranscript: TranscriptEntry[] | null = null;
 
-    if (!rawTranscript || rawTranscript.length === 0) {
-      result.error = 'No transcript available for this video';
-      // Mark as fetched but with no transcript
-      await prisma.video.update({
-        where: { id: videoId },
-        data: { transcriptFetched: true },
+      // Try YouTube Data API v3 first (if OAuth2 is configured)
+      const ytApiResult = await fetchTranscriptUsingYtApi(videoId);
+      if (ytApiResult && ytApiResult.success && ytApiResult.transcriptEntries) {
+        console.log(`[fetchTranscript] Successfully fetched transcript using YouTube Data API v3 (${ytApiResult.chunksStored} entries)`);
+        normalizedTranscript = ytApiResult.transcriptEntries;
+      } else {
+        // Fall back to youtube-transcript library
+        console.log(`[fetchTranscript] OAuth2 not configured or failed, trying youtube-transcript library...`);
+        const rawTranscript = await YoutubeTranscript.fetchTranscript(videoId);
+
+        if (!rawTranscript || rawTranscript.length === 0) {
+          result.error = 'No transcript available for this video';
+          console.error(`[fetchTranscript] Empty transcript returned for video: ${videoId}`);
+          // Don't mark as fetched - allow retry
+          return result;
+        }
+
+        console.log(`[fetchTranscript] Successfully fetched ${rawTranscript.length} transcript entries using youtube-transcript library`);
+
+        // Normalize transcript entries
+        normalizedTranscript = normalizeTranscript(rawTranscript);
+      }
+
+      if (!normalizedTranscript || normalizedTranscript.length === 0) {
+        result.error = 'Failed to parse transcript entries';
+        return result;
+      }
+
+      // Store transcript chunks in database
+      const chunkData = normalizedTranscript.map((entry) => ({
+        videoId,
+        text: entry.text,
+        startTime: entry.startTime,
+      }));
+
+      // Use transaction to ensure atomicity
+      await prisma.$transaction(async (tx) => {
+        // Delete existing chunks if any (for idempotency)
+        await tx.transcriptChunk.deleteMany({
+          where: { videoId },
+        });
+
+        // Insert new chunks
+        await tx.transcriptChunk.createMany({
+          data: chunkData,
+        });
+
+        // Mark video as transcript fetched
+        await tx.video.update({
+          where: { id: videoId },
+          data: { transcriptFetched: true },
+        });
       });
+
+      result.success = true;
+      result.chunksStored = chunkData.length;
+
+      console.log(`[fetchTranscript] Stored ${result.chunksStored} chunks for video: ${videoId}`);
       return result;
+    } catch (transcriptError) {
+      // Re-throw to be caught by outer catch block
+      throw transcriptError;
     }
-
-    // Normalize transcript entries
-    const normalizedTranscript = normalizeTranscript(rawTranscript);
-
-    // Store transcript chunks in database
-    const chunkData = normalizedTranscript.map((entry) => ({
-      videoId,
-      text: entry.text,
-      startTime: entry.startTime,
-    }));
-
-    // Use transaction to ensure atomicity
-    await prisma.$transaction(async (tx) => {
-      // Delete existing chunks if any (for idempotency)
-      await tx.transcriptChunk.deleteMany({
-        where: { videoId },
-      });
-
-      // Insert new chunks
-      await tx.transcriptChunk.createMany({
-        data: chunkData,
-      });
-
-      // Mark video as transcript fetched
-      await tx.video.update({
-        where: { id: videoId },
-        data: { transcriptFetched: true },
-      });
-    });
-
-    result.success = true;
-    result.chunksStored = chunkData.length;
-
-    console.log(`[fetchTranscript] Stored ${result.chunksStored} chunks for video: ${videoId}`);
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error';
     result.error = errorMessage;
     console.error(`[fetchTranscript] Error fetching transcript for ${videoId}: ${errorMessage}`);
+    console.error(`[fetchTranscript] Full error:`, err);
 
-    // If transcript is disabled or unavailable, mark as fetched to avoid retrying
-    if (
-      errorMessage.includes('disabled') ||
-      errorMessage.includes('unavailable') ||
-      errorMessage.includes('Could not get')
-    ) {
+    // Only mark as fetched if we're certain the transcript is permanently unavailable
+    // Otherwise, leave it as false so we can retry
+    const permanentErrors = [
+      'Transcript is disabled',
+      'Transcripts are disabled',
+      'video does not have transcripts',
+    ];
+
+    if (permanentErrors.some((msg) => errorMessage.toLowerCase().includes(msg.toLowerCase()))) {
       try {
         await prisma.video.update({
           where: { id: videoId },
           data: { transcriptFetched: true },
         });
+        console.log(`[fetchTranscript] Marked video ${videoId} as permanently unavailable`);
       } catch {
         // Ignore update error
       }
+    } else {
+      // For other errors, don't mark as fetched so we can retry
+      console.log(`[fetchTranscript] Not marking video ${videoId} as fetched - will retry later`);
     }
   }
 
